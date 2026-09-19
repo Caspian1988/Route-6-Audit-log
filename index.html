@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Route 6 Audit Log</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: #121212;
+      color: #ffffff;
+      margin: 0;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    header { text-align: center; margin-bottom: 16px; }
+    h1 { margin: 0; font-size: 1.4rem; color: #00e676; }
+    p.subtitle { margin: 4px 0 0 0; font-size: 0.8rem; color: #888; }
+    .card {
+      background-color: #1e1e1e;
+      border-radius: 12px;
+      padding: 16px;
+      width: 100%;
+      max-width: 420px;
+      margin-bottom: 12px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    }
+    .card-title {
+      font-size: 0.75rem;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+    }
+    button {
+      border: none;
+      padding: 12px;
+      font-size: 0.95rem;
+      font-weight: bold;
+      border-radius: 8px;
+      width: 100%;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .btn-start { background-color: #00e676; color: #121212; }
+    .btn-stop { background-color: #ff5252; color: #ffffff; }
+    .btn-dispatch { background-color: #ff9800; color: #000000; }
+    .btn-export { background-color: #2196f3; color: #ffffff; }
+    .btn-danger { background-color: #333333; color: #ff5252; border: 1px solid #ff5252; }
+    .status-val { font-size: 1.1rem; font-weight: bold; color: #fff; margin-top: 4px; }
+    .trip-display { font-size: 2.2rem; font-weight: bold; text-align: center; color: #00e676; margin: 4px 0; }
+    .log-list {
+      list-style-type: none;
+      padding-left: 0;
+      margin: 0;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: #ddd;
+    }
+    .log-list li {
+      padding: 6px 0;
+      border-bottom: 1px solid #2a2a2a;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Route 6 Audit Log</h1>
+    <p class="subtitle">Automated GPS Terminal Logging & Dispatch Audit</p>
+  </header>
+
+  <!-- WEATHER WIDGET -->
+  <div class="card" id="weatherCard" style="display:none;">
+    <div class="card-title">Terminal Weather</div>
+    <div style="display: flex; align-items: center; justify-content: space-around;">
+      <div id="weatherIcon" style="font-size: 2rem;">☀️</div>
+      <div>
+        <div id="tempDisplay" style="font-size: 1.5rem; font-weight: bold;">--°F</div>
+        <div id="conditionDisplay" style="font-size: 0.85rem; color: #bbb;">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHIFT STATUS & TRIP TRACKER -->
+  <div class="card">
+    <div class="card-title">Live Tracking</div>
+    <div id="statusText" class="status-val">Offline</div>
+    <div class="trip-display" id="tripCounter">0</div>
+    <div style="text-align: center; font-size: 0.8rem; color: #aaa;">Completed Trips</div>
+    <button id="toggleBtn" class="btn-start" onclick="toggleShift()">Start Shift Tracking</button>
+  </div>
+
+  <!-- DISPATCH OVERRIDE LOGGING -->
+  <div class="card" style="border: 1px solid #ff9800;">
+    <div class="card-title" style="color: #ff9800;">Dispatch Directives</div>
+    <button class="btn-dispatch" onclick="logDispatchOverride('Held / Reset by Central Dispatch')">
+      ⚠️ Log "Held / Reset by Dispatch"
+    </button>
+    <button class="btn-dispatch" style="background-color: #e91e63; color: #fff;" onclick="logDispatchOverride('Traffic / Heavy Congestion Delay')">
+      🚦 Log "Traffic / Congestion Delay"
+    </button>
+  </div>
+
+  <!-- AUDIT LOG FEED & EXPORT -->
+  <div class="card">
+    <div class="card-title">Audit Feed</div>
+    <ul id="logFeed" class="log-list">
+      <li>[System Ready] Press Start Shift to begin logging.</li>
+    </ul>
+    <button class="btn-export" onclick="exportAuditLog()">📄 Export Official Audit Log (.txt)</button>
+    <button class="btn-danger" onclick="clearAuditLog()">🗑️ Clear Audit Log</button>
+  </div>
+
+  <script>
+    // --- TERMINALS CONFIG ---
+    const TERMINALS = {
+      PARKSIDE: { name: "Parkside", lat: 39.0225, lon: -77.0972 },
+      MALL: { name: "Montgomery Mall", lat: 39.0251, lon: -77.1464 }
+    };
+    const GEOFENCE_RADIUS = 150; // meters
+
+    // --- APP STATE ---
+    let isTracking = false;
+    let watchId = null;
+    let wakeLock = null;
+    let tripCount = parseInt(localStorage.getItem('r6_trip_count')) || 0;
+    let lastTerminal = localStorage.getItem('r6_last_terminal') || null;
+    let auditLog = JSON.parse(localStorage.getItem('r6_audit_log')) || [];
+
+    // Initialize UI on load
+    document.getElementById('tripCounter').innerText = tripCount;
+    renderLogFeed();
+
+    // --- HAVERSINE FORMULA ---
+    function getDistanceMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+    }
+
+    // --- SCREEN WAKE LOCK ---
+    async function requestWakeLock() {
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLock = await navigator.wakeLock.request('screen');
+        }
+      } catch (err) { console.error(err); }
+    }
+
+    function releaseWakeLock() {
+      if (wakeLock) { wakeLock.release(); wakeLock = null; }
+    }
+
+    // --- LOGGING SYSTEM ---
+    function addLogEntry(text) {
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const entry = `[${timeStr}] ${text}`;
+      auditLog.unshift(entry);
+      localStorage.setItem('r6_audit_log', JSON.stringify(auditLog));
+      renderLogFeed();
+    }
+
+    function renderLogFeed() {
+      const feed = document.getElementById('logFeed');
+      if (auditLog.length === 0) {
+        feed.innerHTML = '<li>No events recorded.</li>';
+        return;
+      }
+      feed.innerHTML = auditLog.map(item => `<li>${item}</li>`).join('');
+    }
+
+    function logDispatchOverride(reason) {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition((pos) => {
+          const lat = pos.coords.latitude.toFixed(4);
+          const lon = pos.coords.longitude.toFixed(4);
+          addLogEntry(`DISPATCH DIRECTIVE: "${reason}" at GPS (${lat}, ${lon})`);
+          alert(`Logged: ${reason}`);
+        }, () => {
+          addLogEntry(`DISPATCH DIRECTIVE: "${reason}" (GPS signal missing)`);
+          alert(`Logged: ${reason}`);
+        });
+      }
+    }
+
+    // --- WEATHER LOGIC ---
+    async function fetchWeather(lat, lon) {
+      try {
+        const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const temp = Math.round(data.current.temperature_2m);
+        const code = data.current.weather_code;
+
+        let icon = '☀️', desc = 'Clear';
+        if (code > 0 && code <= 3) { icon = '⛅'; desc = 'Partly Cloudy'; }
+        else if (code >= 45 && code <= 48) { icon = '🌫️'; desc = 'Foggy'; }
+        else if (code >= 51 && code <= 67) { icon = '🌧️'; desc = 'Rain'; }
+        else if (code >= 71 && code <= 77) { icon = '❄️'; desc = 'Snow'; }
+        else if (code >= 80 && code <= 99) { icon = '⛈️'; desc = 'Storms'; }
+
+        document.getElementById('weatherCard').style.display = 'block';
+        document.getElementById('weatherIcon').innerText = icon;
+        document.getElementById('tempDisplay').innerText = `${temp}°F`;
+        document.getElementById('conditionDisplay').innerText = desc;
+      } catch (err) { console.log(err); }
+    }
+
+    // --- GPS PROCESSOR ---
+    function processLocation(pos) {
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+
+      fetchWeather(lat, lon);
+
+      const dParkside = getDistanceMeters(lat, lon, TERMINALS.PARKSIDE.lat, TERMINALS.PARKSIDE.lon);
+      const dMall = getDistanceMeters(lat, lon, TERMINALS.MALL.lat, TERMINALS.MALL.lon);
+
+      let currentTerminal = null;
+      if (dParkside <= GEOFENCE_RADIUS) currentTerminal = "PARKSIDE";
+      if (dMall <= GEOFENCE_RADIUS) currentTerminal = "MALL";
+
+      const statusEl = document.getElementById('statusText');
+
+      if (currentTerminal) {
+        statusEl.innerText = `At ${TERMINALS[currentTerminal].name}`;
+        
+        if (lastTerminal && lastTerminal !== currentTerminal) {
+          tripCount++;
+          document.getElementById('tripCounter').innerText = tripCount;
+          localStorage.setItem('r6_trip_count', tripCount);
+          addLogEntry(`ARRIVED: ${TERMINALS[currentTerminal].name} | Trip #${tripCount} Complete`);
+        }
+        lastTerminal = currentTerminal;
+        localStorage.setItem('r6_last_terminal', lastTerminal);
+      } else {
+        statusEl.innerText = "In Transit...";
+      }
+    }
+
+    // --- TRACKING TOGGLE ---
+    function toggleShift() {
+      const btn = document.getElementById('toggleBtn');
+      const statusEl = document.getElementById('statusText');
+
+      if (!isTracking) {
+        if ("geolocation" in navigator) {
+          watchId = navigator.geolocation.watchPosition(
+            processLocation,
+            (err) => { statusEl.innerText = `GPS Error: ${err.message}`; },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+          );
+          requestWakeLock();
+          isTracking = true;
+          btn.innerText = "Stop Shift Tracking";
+          btn.className = "btn-stop";
+          statusEl.innerText = "Acquiring GPS...";
+          addLogEntry("SHIFT STARTED: Tracking Active");
+        }
+      } else {
+        if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+        releaseWakeLock();
+        isTracking = false;
+        btn.innerText = "Start Shift Tracking";
+        btn.className = "btn-start";
+        statusEl.innerText = "Offline";
+        document.getElementById('weatherCard').style.display = 'none';
+        addLogEntry("SHIFT STOPPED: Tracking Paused");
+      }
+    }
+
+    // --- EXPORT & CLEAR ---
+    function exportAuditLog() {
+      if (auditLog.length === 0) return alert("Log is empty!");
+      const fileText = "ROUTE 6 SHIFT DETECTIVE AUDIT LOG\nGenerated: " + new Date().toLocaleString() + "\n\n" + auditLog.join("\n");
+      const blob = new Blob([fileText], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `Route6_Audit_Log_${new Date().toISOString().slice(0,10)}.txt`;
+      a.click();
+    }
+
+    function clearAuditLog() {
+      if (confirm("Reset audit log and trip count for new shift?")) {
+        auditLog = [];
+        tripCount = 0;
+        lastTerminal = null;
+        localStorage.removeItem('r6_audit_log');
+        localStorage.removeItem('r6_trip_count');
+        localStorage.removeItem('r6_last_terminal');
+        document.getElementById('tripCounter').innerText = "0";
+        renderLogFeed();
+      }
+    }
+  </script>
+</body>
+</html>
