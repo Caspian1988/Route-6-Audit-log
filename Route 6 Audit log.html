@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Route 6 Audit Log</title>
+  <title>Route 6 Shift Detective</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -71,7 +71,7 @@
 <body>
 
   <header>
-    <h1>Route 6 Audit Log</h1>
+    <h1>Route 6 Shift Detective</h1>
     <p class="subtitle">Automated GPS Terminal Logging & Dispatch Audit</p>
   </header>
 
@@ -194,8 +194,9 @@
       }
     }
 
-    // --- WEATHER LOGIC ---
+    // --- SAFE & ISOLATED WEATHER LOGIC ---
     async function fetchWeather(lat, lon) {
+      // Wrapped in try/catch and setTimeout so weather issues NEVER stop GPS tracking
       try {
         const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`);
         if (!res.ok) return;
@@ -214,7 +215,10 @@
         document.getElementById('weatherIcon').innerText = icon;
         document.getElementById('tempDisplay').innerText = `${temp}°F`;
         document.getElementById('conditionDisplay').innerText = desc;
-      } catch (err) { console.log(err); }
+      } catch (err) {
+        // Silently catch weather error so tracking is uninterrupted
+        console.log("Weather skipped safely:", err);
+      }
     }
 
     // --- GPS PROCESSOR ---
@@ -222,8 +226,10 @@
       const lat = pos.coords.latitude;
       const lon = pos.coords.longitude;
 
-      fetchWeather(lat, lon);
+      // 1. Fire weather request safely in background
+      setTimeout(() => fetchWeather(lat, lon), 0);
 
+      // 2. Core Terminal Geofencing & Trip Logic
       const dParkside = getDistanceMeters(lat, lon, TERMINALS.PARKSIDE.lat, TERMINALS.PARKSIDE.lon);
       const dMall = getDistanceMeters(lat, lon, TERMINALS.MALL.lat, TERMINALS.MALL.lon);
 
